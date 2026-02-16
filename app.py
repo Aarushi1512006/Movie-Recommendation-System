@@ -1,10 +1,20 @@
 import requests
 import streamlit as st
+import asyncio
+import main  # Direct import of your logic
+
+# Initialize logic on startup
+if "data_loaded" not in st.session_state:
+    try:
+        main.load_pickles()
+        st.session_state.data_loaded = True
+    except Exception as e:
+        st.error(f"Failed to load data files: {e}")
 
 # =============================
 # CONFIG
 # =============================
-API_BASE = "https://movie-rec-466x.onrender.com" or "http://127.0.0.1:8000"
+# API_BASE is no longer needed but kept as placeholder for helper logic
 TMDB_IMG = "https://image.tmdb.org/t/p/w500"
 
 st.set_page_config(page_title="Movie Recommender", page_icon="🎬", layout="wide")
@@ -14,11 +24,87 @@ st.set_page_config(page_title="Movie Recommender", page_icon="🎬", layout="wid
 # =============================
 st.markdown(
     """
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600;800&display=swap" rel="stylesheet">
 <style>
-.block-container { padding-top: 1rem; padding-bottom: 2rem; max-width: 1400px; }
-.small-muted { color:#6b7280; font-size: 0.92rem; }
-.movie-title { font-size: 0.9rem; line-height: 1.15rem; height: 2.3rem; overflow: hidden; }
-.card { border: 1px solid rgba(0,0,0,0.08); border-radius: 16px; padding: 14px; background: rgba(255,255,255,0.7); }
+    /* Gen-Z Neon Dark Mode */
+    * {
+        font-family: 'Outfit', sans-serif;
+    }
+    
+    .stApp {
+        background: radial-gradient(circle at 50% 50%, #1a1a2e 0%, #0f0f1b 100%);
+        color: #e0e0e0;
+    }
+    
+    .block-container { 
+        padding-top: 2rem; 
+        max-width: 1400px; 
+    }
+    
+    /* Glassmorphism Cards */
+    .card { 
+        border: 1px solid rgba(255, 255, 255, 0.1); 
+        border-radius: 24px; 
+        padding: 16px; 
+        background: rgba(255, 255, 255, 0.03); 
+        backdrop-filter: blur(12px);
+        transition: all 0.4s cubic-bezier(0.175, 0.885, 0.32, 1.275);
+    }
+    
+    .card:hover {
+        transform: scale(1.05);
+        box-shadow: 0 0 30px rgba(0, 242, 255, 0.2);
+        border-color: #00f2ff;
+        background: rgba(255, 255, 255, 0.06);
+    }
+    
+    .movie-title { 
+        font-size: 1rem; 
+        font-weight: 600;
+        margin-top: 12px;
+        color: #ffffff;
+        background: linear-gradient(90deg, #00f2ff, #7000ff);
+        -webkit-background-clip: text;
+        -webkit-text-fill-color: transparent;
+        line-height: 1.2rem; 
+        height: 2.4rem; 
+        overflow: hidden; 
+    }
+
+    .small-muted { 
+        color: #a0a0c0; 
+        font-size: 0.85rem;
+        background: rgba(0, 242, 255, 0.1);
+        padding: 2px 8px;
+        border-radius: 8px;
+        display: inline-block;
+        margin-bottom: 4px;
+    }
+
+    /* Buttons & Inputs */
+    .stButton>button {
+        border-radius: 12px;
+        background: linear-gradient(45deg, #00f2ff, #7000ff);
+        color: white;
+        border: none;
+        font-weight: 700;
+        text-transform: uppercase;
+        letter-spacing: 1px;
+        transition: all 0.3s;
+    }
+    
+    .stButton>button:hover {
+        box-shadow: 0 0 20px rgba(112, 0, 255, 0.6);
+        transform: translateY(-2px);
+    }
+
+    /* Search Input styling */
+    .stTextInput>div>div>input {
+        background: rgba(255,255,255,0.05) !important;
+        border: 1px solid rgba(0, 242, 255, 0.3) !important;
+        border-radius: 15px !important;
+        color: #fff !important;
+    }
 </style>
 """,
     unsafe_allow_html=True,
@@ -31,6 +117,8 @@ if "view" not in st.session_state:
     st.session_state.view = "home"  # home | details
 if "selected_tmdb_id" not in st.session_state:
     st.session_state.selected_tmdb_id = None
+if "watchlist" not in st.session_state:
+    st.session_state.watchlist = []  # list of movie cards
 
 qp_view = st.query_params.get("view")
 qp_id = st.query_params.get("id")
@@ -60,18 +148,67 @@ def goto_details(tmdb_id: int):
     st.rerun()
 
 
+def goto_watchlist():
+    st.session_state.view = "watchlist"
+    st.query_params["view"] = "watchlist"
+    if "id" in st.query_params:
+        del st.query_params["id"]
+    st.rerun()
+
+
 # =============================
-# API HELPERS
+# LOCAL LOGIC BRIDGE (Replacement for API)
 # =============================
-@st.cache_data(ttl=30)  # short cache for autocomplete
 def api_get_json(path: str, params: dict | None = None):
+    """
+    Instead of calling Render, we call main.py functions directly.
+    """
+    params = params or {}
+    
     try:
-        r = requests.get(f"{API_BASE}{path}", params=params, timeout=25)
-        if r.status_code >= 400:
-            return None, f"HTTP {r.status_code}: {r.text[:300]}"
-        return r.json(), None
+        # Helper to run async functions in Streamlit sync thread
+        def run_async(coro):
+            try:
+                loop = asyncio.get_event_loop()
+            except RuntimeError:
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+            return loop.run_until_complete(coro)
+
+        # Map 'paths' to local functions in main.py
+        if path == "/tmdb/search":
+            data = run_async(main.tmdb_search(query=params.get("query"), page=params.get("page", 1)))
+            return data, None
+            
+        if path == "/home":
+            data = run_async(main.home(category=params.get("category", "popular"), limit=params.get("limit", 24)))
+            # The FastAPI route returns Pydantic models, we convert to dict for app.py
+            return [m.model_dump() for m in data], None
+            
+        if path.startswith("/movie/id/"):
+            tmdb_id = int(path.split("/")[-1])
+            data = run_async(main.movie_details_route(tmdb_id))
+            return data.model_dump(), None
+            
+        if path == "/movie/search":
+            data = run_async(main.search_bundle(
+                query=params.get("query"), 
+                tfidf_top_n=params.get("tfidf_top_n", 12),
+                genre_limit=params.get("genre_limit", 12)
+            ))
+            return data.model_dump(), None
+            
+        if path == "/recommend/genre":
+            data = run_async(main.recommend_genre(
+                tmdb_id=params.get("tmdb_id"),
+                limit=params.get("limit", 18)
+            ))
+            return [m.model_dump() for m in data], None
+
+        return None, f"Local route {path} not mapped."
+        
     except Exception as e:
-        return None, f"Request failed: {e}"
+        return None, f"Local execution failed: {e}"
 
 
 def poster_grid(cards, cols=6, key_prefix="grid"):
@@ -95,7 +232,7 @@ def poster_grid(cards, cols=6, key_prefix="grid"):
 
             with colset[c]:
                 if poster:
-                    st.image(poster, use_column_width=True)
+                    st.image(poster, width='stretch')
                 else:
                     st.write("🖼️ No poster")
 
@@ -203,8 +340,10 @@ def parse_tmdb_search_to_cards(data, keyword: str, limit: int = 24):
 # =============================
 with st.sidebar:
     st.markdown("## 🎬 Menu")
-    if st.button("🏠 Home"):
+    if st.button("🏠 Home", width='stretch'):
         goto_home()
+    if st.button("💖 My Obsessions", width='stretch'):
+        goto_watchlist()
 
     st.markdown("---")
     st.markdown("### 🏠 Home Feed (only home)")
@@ -218,9 +357,12 @@ with st.sidebar:
 # =============================
 # HEADER
 # =============================
-st.title("🎬 Movie Recommender")
+# =============================
+# HEADER
+# =============================
+st.title("✨ FlixVibe")
 st.markdown(
-    "<div class='small-muted'>Type keyword → dropdown suggestions + matching results → open → details + recommendations</div>",
+    "<div class='small-muted'>Find your next obsession. No mid recs, just bangers. 🔥</div>",
     unsafe_allow_html=True,
 )
 st.divider()
@@ -230,7 +372,7 @@ st.divider()
 # ==========================================================
 if st.session_state.view == "home":
     typed = st.text_input(
-        "Search by movie title (keyword)", placeholder="Type: avenger, batman, love..."
+        "🔍 Search the vibe", placeholder="e.g. Batman, Inception, Dune..."
     )
 
     st.divider()
@@ -297,6 +439,20 @@ elif st.session_state.view == "details":
         if st.button("← Back to Home"):
             goto_home()
 
+    # Watchlist logic functions
+    def toggle_watchlist(movie_data):
+        current_ids = [m["tmdb_id"] for m in st.session_state.watchlist]
+        if movie_data["tmdb_id"] in current_ids:
+            st.session_state.watchlist = [
+                m for m in st.session_state.watchlist if m["tmdb_id"] != movie_data["tmdb_id"]
+            ]
+        else:
+            st.session_state.watchlist.append({
+                "tmdb_id": movie_data["tmdb_id"],
+                "title": movie_data["title"],
+                "poster_url": movie_data.get("poster_url")
+            })
+
     # Details (your FastAPI safe route)
     data, err = api_get_json(f"/movie/id/{tmdb_id}")
     if err or not data:
@@ -309,7 +465,7 @@ elif st.session_state.view == "details":
     with left:
         st.markdown("<div class='card'>", unsafe_allow_html=True)
         if data.get("poster_url"):
-            st.image(data["poster_url"], use_column_width=True)
+            st.image(data["poster_url"], width='stretch')
         else:
             st.write("🖼️ No poster")
         st.markdown("</div>", unsafe_allow_html=True)
@@ -328,11 +484,19 @@ elif st.session_state.view == "details":
         st.markdown("---")
         st.markdown("### Overview")
         st.write(data.get("overview") or "No overview available.")
+        
+        # Add to Watchlist Button
+        is_in_watchlist = data["tmdb_id"] in [m["tmdb_id"] for m in st.session_state.watchlist]
+        label = "💔 Remove from Watchlist" if is_in_watchlist else "💖 Add to My Obsessions"
+        if st.button(label, width='stretch'):
+            toggle_watchlist(data)
+            st.rerun()
+            
         st.markdown("</div>", unsafe_allow_html=True)
 
     if data.get("backdrop_url"):
         st.markdown("#### Backdrop")
-        st.image(data["backdrop_url"], use_column_width=True)
+        st.image(data["backdrop_url"], width='stretch')
 
     st.divider()
     st.markdown("### ✅ Recommendations")
@@ -372,3 +536,23 @@ elif st.session_state.view == "details":
                 st.warning("No recommendations available right now.")
     else:
         st.warning("No title available for recommendations.")
+
+# ==========================================================
+# VIEW: WATCHLIST
+# ==========================================================
+elif st.session_state.view == "watchlist":
+    st.markdown("### 💖 My Obsessions")
+    st.markdown("<div class='small-muted'>Your personal collection of bangers.</div>", unsafe_allow_html=True)
+    st.divider()
+    
+    if not st.session_state.watchlist:
+        st.info("Your watchlist is empty. Go find some movies to obsess over! 🍿")
+        if st.button("Browse Movies"):
+            goto_home()
+    else:
+        # Show watchlist in grid
+        poster_grid(st.session_state.watchlist, cols=grid_cols, key_prefix="watchlist_grid")
+        
+        if st.button("Clear All"):
+            st.session_state.watchlist = []
+            st.rerun()

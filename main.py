@@ -106,16 +106,26 @@ def make_img_url(path: Optional[str]) -> Optional[str]:
 
 async def tmdb_get(path: str, params: Dict[str, Any]) -> Dict[str, Any]:
     """
-    Safe TMDB GET:
+    Safe TMDB GET with Retry Logic:
+    - Retries once on connection errors (ConnectError)
     - Network errors -> 502
     - TMDB API errors -> 502 with detail
     """
     q = dict(params)
     q["api_key"] = TMDB_API_KEY
+    url = f"{TMDB_BASE}{path}"
+
+    async def _make_request():
+        async with httpx.AsyncClient(timeout=30) as client:
+            return await client.get(url, params=q)
 
     try:
-        async with httpx.AsyncClient(timeout=20) as client:
-            r = await client.get(f"{TMDB_BASE}{path}", params=q)
+        try:
+            r = await _make_request()
+        except (httpx.ConnectError, httpx.ConnectTimeout):
+            # One-time retry for flaky connections/DNS issues
+            r = await _make_request()
+            
     except httpx.RequestError as e:
         raise HTTPException(
             status_code=502,
