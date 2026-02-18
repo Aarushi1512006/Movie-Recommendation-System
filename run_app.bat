@@ -5,7 +5,7 @@ if not exist .venv (
     echo Creating virtual environment...
     python -m venv .venv
 )
-call .venv\Scripts\activate.ps1
+call .venv\Scripts\activate
 pip install -r requirements.txt
 streamlit run app.py
 pause
