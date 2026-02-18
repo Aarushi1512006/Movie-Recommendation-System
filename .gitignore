@@ -1,0 +1,8 @@
+.env
+.venv/
+__pycache__/
+*.pyc
+*.pkl
+*.gz
+!*.pkl.gz
+.streamlit/config.toml
