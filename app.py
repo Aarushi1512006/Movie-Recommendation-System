@@ -1,231 +1,361 @@
 import streamlit as st
-import asyncio
-import main  # Direct import of your logic
+import pandas as pd
+import numpy as np
+import ast
+import re
+import nltk
+from nltk.corpus import stopwords
+from nltk.stem import WordNetLemmatizer
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.metrics.pairwise import cosine_similarity
+import os
+import pickle
 
-# Initialize logic on startup
-if "data_loaded" not in st.session_state:
-    try:
-        main.load_pickles()
-        st.session_state.data_loaded = True
-    except Exception as e:
-        st.error(f"Failed to load data files: {e}")
-
-# =============================
-# CONFIG
-# =============================
-TMDB_IMG = "https://image.tmdb.org/t/p/w500"
-st.set_page_config(page_title="Movie Recommender", page_icon="🎬", layout="wide")
-
-# =============================
-# STYLES (minimal modern)
-# =============================
-st.markdown(
-    """
-    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600;800&display=swap" rel="stylesheet">
-<style>
-    /* Gen-Z Neon Dark Mode */
-    * { font-family: 'Outfit', sans-serif; }
-    .stApp { background: radial-gradient(circle at 50% 50%, #1a1a2e 0%, #0f0f1b 100%); color: #e0e0e0; }
-    .block-container { padding-top: 2rem; max-width: 1400px; }
-    .card { border: 1px solid rgba(255, 255, 255, 0.1); border-radius: 24px; padding: 16px; background: rgba(255, 255, 255, 0.03); backdrop-filter: blur(12px); transition: all 0.4s cubic-bezier(0.175, 0.885, 0.32, 1.275); }
-    .card:hover { transform: scale(1.05); box-shadow: 0 0 30px rgba(0, 242, 255, 0.2); border-color: #00f2ff; background: rgba(255, 255, 255, 0.06); }
-    .movie-title { font-size: 1rem; font-weight: 600; margin-top: 12px; color: #ffffff; background: linear-gradient(90deg, #00f2ff, #7000ff); -webkit-background-clip: text; -webkit-text-fill-color: transparent; line-height: 1.2rem; height: 2.4rem; overflow: hidden; }
-    .small-muted { color: #a0a0c0; font-size: 0.85rem; background: rgba(0, 242, 255, 0.1); padding: 2px 8px; border-radius: 8px; display: inline-block; margin-bottom: 4px; }
-    .stButton>button { border-radius: 12px; background: linear-gradient(45deg, #00f2ff, #7000ff); color: white; border: none; font-weight: 700; text-transform: uppercase; letter-spacing: 1px; transition: all 0.3s; }
-    .stButton>button:hover { box-shadow: 0 0 20px rgba(112, 0, 255, 0.6); transform: translateY(-2px); }
-    .stTextInput>div>div>input { background: rgba(255,255,255,0.05) !important; border: 1px solid rgba(0, 242, 255, 0.3) !important; border-radius: 15px !important; color: #fff !important; }
-</style>
-""",
-    unsafe_allow_html=True,
+# ─── Page Config ────────────────────────────────────────────────────────────────
+st.set_page_config(
+    page_title="🎬 Movie Recommender",
+    page_icon="🎬",
+    layout="wide",
+    initial_sidebar_state="expanded",
 )
 
-# =============================
-# STATE + ROUTING
-# =============================
-if "view" not in st.session_state: st.session_state.view = "home"
-if "selected_tmdb_id" not in st.session_state: st.session_state.selected_tmdb_id = None
-if "watchlist" not in st.session_state: st.session_state.watchlist = []
+# ─── Custom CSS ─────────────────────────────────────────────────────────────────
+st.markdown("""
+<style>
+    .stApp { background-color: #0f0f1a; color: #e0e0e0; }
 
-qp_view = st.query_params.get("view")
-qp_id = st.query_params.get("id")
-if qp_view in ("home", "details"): st.session_state.view = qp_view
-if qp_id:
-    try:
-        st.session_state.selected_tmdb_id = int(qp_id)
-        st.session_state.view = "details"
-    except: pass
+    [data-testid="stSidebar"] {
+        background: linear-gradient(180deg, #1a1a2e 0%, #16213e 100%);
+        border-right: 1px solid #2a2a4a;
+    }
 
-def goto_home():
-    st.session_state.view = "home"
-    st.query_params["view"] = "home"
-    if "id" in st.query_params: del st.query_params["id"]
-    st.rerun()
+    .hero {
+        background: linear-gradient(135deg, #1a1a2e 0%, #16213e 50%, #0f3460 100%);
+        border-radius: 16px;
+        padding: 2.5rem 2rem;
+        margin-bottom: 2rem;
+        border: 1px solid #2a2a5a;
+        text-align: center;
+    }
+    .hero h1 { font-size: 2.8rem; margin: 0; color: #fff; font-weight: 800; letter-spacing: -1px; }
+    .hero p  { color: #a0a0c0; font-size: 1.1rem; margin-top: 0.5rem; }
 
-def goto_details(tmdb_id: int):
-    st.session_state.view = "details"
-    st.session_state.selected_tmdb_id = int(tmdb_id)
-    st.query_params["view"] = "details"
-    st.query_params["id"] = str(int(tmdb_id))
-    st.rerun()
+    .movie-card {
+        background: linear-gradient(135deg, #1a1a2e, #16213e);
+        border: 1px solid #2a2a4a;
+        border-radius: 12px;
+        padding: 1.2rem;
+        margin-bottom: 0.8rem;
+        transition: border-color 0.2s, transform 0.2s;
+        position: relative;
+    }
+    .movie-card:hover { border-color: #e94560; transform: translateX(4px); }
+    .movie-rank {
+        font-size: 0.75rem;
+        font-weight: 700;
+        color: #e94560;
+        text-transform: uppercase;
+        letter-spacing: 1px;
+        margin-bottom: 0.3rem;
+    }
+    .movie-title { font-size: 1.1rem; font-weight: 700; color: #fff; margin-bottom: 0.4rem; }
+    .movie-meta  { font-size: 0.85rem; color: #7878a0; }
+    .genre-tag {
+        display: inline-block;
+        background: #0f3460;
+        color: #7eb8f7;
+        border-radius: 20px;
+        padding: 2px 10px;
+        font-size: 0.75rem;
+        margin: 2px 2px 0 0;
+    }
+    .rating-badge {
+        display: inline-block;
+        background: #e94560;
+        color: #fff;
+        border-radius: 6px;
+        padding: 2px 8px;
+        font-size: 0.8rem;
+        font-weight: 700;
+        margin-left: 6px;
+    }
 
-def goto_watchlist():
-    st.session_state.view = "watchlist"
-    st.query_params["view"] = "watchlist"
-    if "id" in st.query_params: del st.query_params["id"]
-    st.rerun()
+    .selected-movie {
+        background: linear-gradient(135deg, #0f3460, #16213e);
+        border: 1px solid #e94560;
+        border-radius: 12px;
+        padding: 1.5rem;
+        margin-bottom: 1.5rem;
+    }
+    .selected-movie h3 { color: #e94560; margin-top: 0; }
 
-# =============================
-# LOCAL LOGIC BRIDGE (Helper for Async)
-# =============================
-def api_get_json(path: str, params: dict | None = None):
-    params = params or {}
-    try:
-        def run_async(coro):
-            try:
-                loop = asyncio.get_event_loop()
-            except RuntimeError:
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
-            return loop.run_until_complete(coro)
+    .stat-card {
+        background: #1a1a2e;
+        border: 1px solid #2a2a4a;
+        border-radius: 10px;
+        padding: 1rem;
+        text-align: center;
+    }
+    .stat-value { font-size: 1.8rem; font-weight: 800; color: #e94560; }
+    .stat-label { font-size: 0.8rem; color: #7878a0; text-transform: uppercase; letter-spacing: 1px; }
 
-        if path == "/tmdb/search":
-            data = run_async(main.tmdb_search(query=params.get("query"), page=params.get("page", 1)))
-            return data, None
-        if path == "/home":
-            data = run_async(main.home(category=params.get("category", "popular"), limit=params.get("limit", 24)))
-            return [m.model_dump() for m in data], None
-        if path.startswith("/movie/id/"):
-            tmdb_id = int(path.split("/")[-1])
-            data = run_async(main.movie_details_route(tmdb_id))
-            return data.model_dump(), None
-        if path == "/movie/search":
-            data = run_async(main.search_bundle(query=params.get("query"), tfidf_top_n=params.get("tfidf_top_n", 12), genre_limit=params.get("genre_limit", 12)))
-            return data.model_dump(), None
-        if path == "/recommend/genre":
-            data = run_async(main.recommend_genre(tmdb_id=params.get("tmdb_id"), limit=params.get("limit", 18)))
-            return [m.model_dump() for m in data], None
-        return None, f"Local route {path} not mapped."
-    except Exception as e:
-        return None, f"Local execution failed: {e}"
+    .stSelectbox > div > div, .stTextInput > div > div > input {
+        background-color: #1a1a2e !important;
+        border-color: #2a2a4a !important;
+        color: #e0e0e0 !important;
+    }
+    .stButton > button {
+        background: linear-gradient(135deg, #e94560, #c73652);
+        color: white;
+        border: none;
+        border-radius: 8px;
+        font-weight: 700;
+        width: 100%;
+        padding: 0.6rem 1rem;
+        font-size: 1rem;
+    }
+    .stButton > button:hover { background: linear-gradient(135deg, #ff5577, #e94560); }
+    .stSlider > div > div > div > div { background: #e94560 !important; }
 
-def poster_grid(cards, cols=6, key_prefix="grid"):
-    if not cards:
-        st.info("No movies to show.")
-        return
-    rows = (len(cards) + cols - 1) // cols
-    idx = 0
-    for r in range(rows):
-        colset = st.columns(cols)
-        for c in range(cols):
-            if idx >= len(cards): break
-            m = cards[idx]
-            idx += 1
-            tmdb_id, title, poster = m.get("tmdb_id"), m.get("title", "Untitled"), m.get("poster_url")
-            with colset[c]:
-                if poster: st.image(poster, width='stretch')
-                else: st.write("🖼️ No poster")
-                if st.button("Open", key=f"{key_prefix}_{r}_{c}_{idx}_{tmdb_id}"):
-                    if tmdb_id: goto_details(tmdb_id)
-                st.markdown(f"<div class='movie-title'>{title}</div>", unsafe_allow_html=True)
+    .section-header {
+        font-size: 1.2rem;
+        font-weight: 700;
+        color: #e0e0e0;
+        margin: 1.5rem 0 0.8rem 0;
+        padding-bottom: 0.4rem;
+        border-bottom: 2px solid #e94560;
+        display: inline-block;
+    }
+</style>
+""", unsafe_allow_html=True)
 
-def to_cards_from_tfidf_items(tfidf_items):
-    cards = []
-    for x in tfidf_items or []:
-        tmdb = x.get("tmdb") or {}
-        if tmdb.get("tmdb_id"):
-            cards.append({"tmdb_id": tmdb["tmdb_id"], "title": tmdb.get("title") or x.get("title") or "Untitled", "poster_url": tmdb.get("poster_url")})
-    return cards
 
-def parse_tmdb_search_to_cards(data, keyword: str, limit: int = 24):
-    keyword_l = keyword.strip().lower()
-    if isinstance(data, dict) and "results" in data:
-        raw_items = [{"tmdb_id": int(m["id"]), "title": m.get("title") or "", "poster_url": f"{TMDB_IMG}{m.get('poster_path')}" if m.get('poster_path') else None, "release_date": m.get("release_date", "")} for m in data.get("results") or [] if m.get("id") and m.get("title")]
-    elif isinstance(data, list):
-        raw_items = [{"tmdb_id": int(m.get("tmdb_id") or m.get("id")), "title": m.get("title") or "", "poster_url": m.get("poster_url"), "release_date": m.get("release_date", "")} for m in data if (m.get("tmdb_id") or m.get("id")) and m.get("title")]
-    else: return [], []
-    matched = [x for x in raw_items if keyword_l in x["title"].lower()]
-    final_list = matched if matched else raw_items
-    suggestions = [(f"{x['title']} ({x['release_date'][:4]})" if x.get("release_date") else x["title"], x["tmdb_id"]) for x in final_list[:10]]
-    cards = [{"tmdb_id": x["tmdb_id"], "title": x["title"], "poster_url": x["poster_url"]} for x in final_list[:limit]]
-    return suggestions, cards
+# ─── NLTK Setup ─────────────────────────────────────────────────────────────────
+@st.cache_resource
+def load_nltk():
+    nltk.download('stopwords', quiet=True)
+    nltk.download('wordnet', quiet=True)
+    return set(stopwords.words('english')), WordNetLemmatizer()
 
-# =============================
-# SIDEBAR
-# =============================
+stop_words, lemmatizer = load_nltk()
+
+
+# ─── Preprocessing ──────────────────────────────────────────────────────────────
+def preprocess_text(text):
+    text = str(text).lower()
+    text = re.sub(r'[^a-zA-Z\s]', '', text)
+    words = text.split()
+    words = [w for w in words if w not in stop_words]
+    words = [lemmatizer.lemmatize(w) for w in words]
+    return " ".join(words)
+
+
+# ─── Data Loading & Model Building ──────────────────────────────────────────────
+CACHE_FILES = ['df.pkl', 'tfidf_matrix.pkl', 'indices.pkl', 'tfidf.pkl']
+
+@st.cache_resource(show_spinner=False)
+def build_model(csv_path):
+    if all(os.path.exists(f) for f in CACHE_FILES):
+        df         = pd.read_pickle('df.pkl')
+        tfidf_mat  = pickle.load(open('tfidf_matrix.pkl', 'rb'))
+        indices    = pickle.load(open('indices.pkl', 'rb'))
+        tfidf      = pickle.load(open('tfidf.pkl', 'rb'))
+        return df, tfidf_mat, indices, tfidf
+
+    df = pd.read_csv(csv_path, low_memory=False)
+    df = df.drop_duplicates().reset_index(drop=True)
+    df = df[['title', 'overview', 'genres', 'tagline', 'vote_average', 'popularity']]
+    df = df.dropna(subset=['title'])
+    df['overview']  = df['overview'].fillna(' ')
+    df['tagline']   = df['tagline'].fillna(' ')
+    df['genres']    = df['genres'].apply(
+        lambda x: " ".join([i['name'] for i in ast.literal_eval(x)]) if x and x != '[]' else ''
+    )
+    df['tags'] = df['overview'] + " " + df['genres'] + " " + df['tagline']
+    df['tags'] = df['tags'].apply(preprocess_text)
+    df = df.reset_index(drop=True)
+    df['vote_average'] = pd.to_numeric(df['vote_average'], errors='coerce').fillna(0)
+    df['popularity']   = pd.to_numeric(df['popularity'],   errors='coerce').fillna(0)
+
+    indices = pd.Series(df.index, index=df['title']).drop_duplicates()
+
+    tfidf     = TfidfVectorizer(max_features=50000, ngram_range=(1, 2), stop_words='english')
+    tfidf_mat = tfidf.fit_transform(df['tags'])
+    
+    df.to_pickle('df.pkl')
+    pickle.dump(tfidf_mat, open('tfidf_matrix.pkl', 'wb'))
+    pickle.dump(indices, open('indices.pkl', 'wb'))
+    pickle.dump(tfidf, open('tfidf.pkl', 'wb'))
+
+    return df, tfidf_mat, indices, tfidf
+
+
+def recommend(title, df, tfidf_mat, indices, n=10):
+    if title not in indices:
+        return pd.DataFrame()
+    idx       = indices[title]
+    sim_score = cosine_similarity(tfidf_mat[idx], tfidf_mat).flatten()
+    sim_score[idx] = 0
+    similar_idx = sim_score.argsort()[::-1][:n]
+    results   = df.iloc[similar_idx][['title', 'genres', 'vote_average', 'popularity', 'overview', 'tagline']].copy()
+    results['similarity'] = sim_score[similar_idx]
+    return results.reset_index(drop=True)
+
+
+# ─── Sidebar ────────────────────────────────────────────────────────────────────
 with st.sidebar:
-    st.markdown("## 🎬 Menu")
-    if st.button("🏠 Home", width='stretch'): goto_home()
-    if st.button("💖 My Obsessions", width='stretch'): goto_watchlist()
+    st.markdown("## ⚙️ Settings")
     st.markdown("---")
-    home_category = st.selectbox("Category", ["trending", "popular", "top_rated", "now_playing", "upcoming"], index=0)
-    grid_cols = st.slider("Grid columns", 4, 8, 6)
 
-# =============================
-# HEADER
-# =============================
-st.title("✨ FlixVibe")
-st.markdown("<div class='small-muted'>Find your next obsession. No mid recs, just bangers. 🔥</div>", unsafe_allow_html=True)
-st.divider()
+    uploaded = st.file_uploader(
+        "Upload movies_metadata.csv",
+        type=['csv'],
+        help="Upload the TMDB movies_metadata.csv file"
+    )
 
-# =============================
-# VIEWS
-# =============================
-if st.session_state.view == "home":
-    typed = st.text_input("🔍 Search the vibe", placeholder="e.g. Batman, Inception, Dune...")
-    st.divider()
-    if typed.strip():
-        if len(typed.strip()) < 2: st.caption("Type at least 2 characters...")
-        else:
-            data, err = api_get_json("/tmdb/search", params={"query": typed.strip()})
-            if err: st.error(f"Search failed: {err}")
-            else:
-                suggestions, cards = parse_tmdb_search_to_cards(data, typed.strip())
-                if suggestions:
-                    selected = st.selectbox("Suggestions", ["-- Select --"] + [s[0] for s in suggestions])
-                    if selected != "-- Select --": goto_details({s[0]: s[1] for s in suggestions}[selected])
-                else: st.info("No results.")
-                st.markdown("### Results")
-                poster_grid(cards, cols=grid_cols, key_prefix="search_results")
-        st.stop()
-    st.markdown(f"### 🏠 Home — {home_category.title()}")
-    home_cards, err = api_get_json("/home", params={"category": home_category})
-    if err: st.error(f"Feed failed: {err}")
-    else: poster_grid(home_cards or [], cols=grid_cols, key_prefix="home_feed")
+    st.markdown("---")
+    n_recs = st.slider("Number of recommendations", 5, 20, 10)
+    min_rating = st.slider("Minimum vote average", 0.0, 10.0, 0.0, 0.5)
 
-elif st.session_state.view == "details":
-    tmdb_id = st.session_state.selected_tmdb_id
-    if not tmdb_id:
-        st.warning("No movie selected."); st.button("← Back", on_click=goto_home); st.stop()
-    st.button("← Back", on_click=goto_home)
-    data, err = api_get_json(f"/movie/id/{tmdb_id}")
-    if err: st.error(f"Load failed: {err}"); st.stop()
-    left, right = st.columns([1, 2.4], gap="large")
-    with left:
-        st.markdown("<div class='card'>", unsafe_allow_html=True)
-        if data.get("poster_url"): st.image(data["poster_url"], width='stretch')
-        st.markdown("</div>", unsafe_allow_html=True)
-    with right:
-        st.markdown("<div class='card'>", unsafe_allow_html=True)
-        st.markdown(f"## {data.get('title')}")
-        st.markdown(f"<div class='small-muted'>Release: {data.get('release_date', '-')} | Genres: {', '.join([g['name'] for g in data.get('genres', [])])}</div>", unsafe_allow_html=True)
-        st.write(data.get("overview") or "No overview.")
-        is_in = data["tmdb_id"] in [m["tmdb_id"] for m in st.session_state.watchlist]
-        if st.button("💔 Remove" if is_in else "💖 Add to Obsessions"):
-            if is_in: st.session_state.watchlist = [m for m in st.session_state.watchlist if m["tmdb_id"] != data["tmdb_id"]]
-            else: st.session_state.watchlist.append({"tmdb_id": data["tmdb_id"], "title": data["title"], "poster_url": data.get("poster_url")})
-            st.rerun()
-        st.markdown("</div>", unsafe_allow_html=True)
-    st.divider()
-    bundle, err2 = api_get_json("/movie/search", params={"query": data.get("title")})
-    if not err2 and bundle:
-        st.markdown("#### 🔎 Similar (Local)")
-        poster_grid(to_cards_from_tfidf_items(bundle.get("tfidf_recommendations")), cols=grid_cols, key_prefix="tfidf")
-        st.markdown("#### 🎭 More Like This (TMDB)")
-        poster_grid(bundle.get("genre_recommendations") or [], cols=grid_cols, key_prefix="genre")
+    st.markdown("---")
+    st.markdown("### 🎯 About")
+    st.markdown(
+        "Content-based recommender using **TF-IDF** vectorization and "
+        "**cosine similarity** on movie overviews, genres, and taglines.",
+        unsafe_allow_html=True
+    )
 
-elif st.session_state.view == "watchlist":
-    st.markdown("### 💖 My Obsessions")
-    if not st.session_state.watchlist: st.info("Empty! Go find some bangers."); st.button("Browse", on_click=goto_home)
+
+# ─── Hero Header ────────────────────────────────────────────────────────────────
+st.markdown("""
+<div class="hero">
+    <h1>🎬 Movie Recommender</h1>
+    <p>Discover films similar to the ones you love — powered by NLP & cosine similarity</p>
+</div>
+""", unsafe_allow_html=True)
+
+
+# ─── Main Logic ─────────────────────────────────────────────────────────────────
+csv_path = None
+if uploaded:
+    tmp_path = f"/tmp/{uploaded.name}"
+    with open(tmp_path, 'wb') as f:
+        f.write(uploaded.read())
+    csv_path = tmp_path
+elif os.path.exists('movies_metadata.csv'):
+    csv_path = 'movies_metadata.csv'
+
+if csv_path is None:
+    st.info("👈 Upload **movies_metadata.csv** in the sidebar to get started.", icon="📂")
+    st.stop()
+
+with st.spinner("🔄 Loading dataset and building model... (first run may take a minute)"):
+    df, tfidf_mat, indices, tfidf = build_model(csv_path)
+
+# Dataset stats
+col1, col2, col3 = st.columns(3)
+with col1:
+    st.markdown(f"""
+    <div class="stat-card">
+        <div class="stat-value">{len(df):,}</div>
+        <div class="stat-label">Movies</div>
+    </div>""", unsafe_allow_html=True)
+with col2:
+    st.markdown(f"""
+    <div class="stat-card">
+        <div class="stat-value">{tfidf_mat.shape[1]:,}</div>
+        <div class="stat-label">TF-IDF Features</div>
+    </div>""", unsafe_allow_html=True)
+with col3:
+    avg = df['vote_average'].mean()
+    st.markdown(f"""
+    <div class="stat-card">
+        <div class="stat-value">{avg:.1f}</div>
+        <div class="stat-label">Avg Rating</div>
+    </div>""", unsafe_allow_html=True)
+
+st.markdown("<br>", unsafe_allow_html=True)
+
+# ─── Search ─────────────────────────────────────────────────────────────────────
+st.markdown('<div class="section-header">🔍 Find a Movie</div>', unsafe_allow_html=True)
+st.markdown("<br>", unsafe_allow_html=True)
+
+all_titles = sorted(df['title'].dropna().unique().tolist())
+selected   = st.selectbox(
+    "Type or select a movie title",
+    options=[""] + all_titles,
+    index=0,
+    placeholder="e.g. Avatar, Toy Story, Inception..."
+)
+
+col_btn, col_space = st.columns([1, 3])
+with col_btn:
+    get_recs = st.button("🎯 Get Recommendations")
+
+# ─── Results ────────────────────────────────────────────────────────────────────
+if get_recs and selected:
+    movie_info = df[df['title'] == selected]
+    if not movie_info.empty:
+        m = movie_info.iloc[0]
+        st.markdown(f"""
+        <div class="selected-movie">
+            <h3>📽️ {m['title']}</h3>
+            <p style="color:#a0a0c0; margin:0.3rem 0">{m['overview'][:280]}{'...' if len(str(m['overview'])) > 280 else ''}</p>
+            <p style="margin-top:0.8rem">
+                {''.join(f'<span class="genre-tag">{g.strip()}</span>' for g in str(m['genres']).split() if g.strip())}
+                <span class="rating-badge">⭐ {m['vote_average']:.1f}</span>
+            </p>
+        </div>
+        """, unsafe_allow_html=True)
+
+    with st.spinner("🔍 Finding similar movies..."):
+        results = recommend(selected, df, tfidf_mat, indices, n=50)
+
+    if results.empty:
+        st.error("Movie not found in the database. Please try another title.")
     else:
-        poster_grid(st.session_state.watchlist, cols=grid_cols, key_prefix="watchlist")
-        if st.button("Clear All"): st.session_state.watchlist = []; st.rerun()
+        results = results[results['vote_average'] >= min_rating].head(n_recs)
+
+        if results.empty:
+            st.warning(f"No movies found with rating ≥ {min_rating}. Try lowering the filter.")
+        else:
+            st.markdown(
+                f'<div class="section-header">🎞️ Top {len(results)} Recommendations</div>',
+                unsafe_allow_html=True
+            )
+            st.markdown("<br>", unsafe_allow_html=True)
+
+            left, right = st.columns(2)
+            for i, (_, row) in enumerate(results.iterrows()):
+                genres_html = ''.join(
+                    f'<span class="genre-tag">{g.strip()}</span>'
+                    for g in str(row['genres']).split() if g.strip()
+                )
+                overview_snippet = str(row['overview'])[:160] + ('...' if len(str(row['overview'])) > 160 else '')
+                sim_pct = int(row['similarity'] * 100)
+
+                card = f"""
+                <div class="movie-card">
+                    <div class="movie-rank">#{i+1} &nbsp;·&nbsp; {sim_pct}% match</div>
+                    <div class="movie-title">{row['title']}
+                        <span class="rating-badge">⭐ {row['vote_average']:.1f}</span>
+                    </div>
+                    <div style="margin:0.4rem 0">{genres_html}</div>
+                    <div class="movie-meta">{overview_snippet}</div>
+                </div>
+                """
+                if i % 2 == 0:
+                    left.markdown(card, unsafe_allow_html=True)
+                else:
+                    right.markdown(card, unsafe_allow_html=True)
+
+elif get_recs and not selected:
+    st.warning("Please select a movie first.")
+
+elif not get_recs:
+    st.markdown("""
+    <div style="text-align:center; color:#4a4a7a; padding: 3rem 0;">
+        <div style="font-size:4rem">🎥</div>
+        <div style="font-size:1.1rem; margin-top:0.5rem">Select a movie and click <b>Get Recommendations</b></div>
+    </div>
+    """, unsafe_allow_html=True)
